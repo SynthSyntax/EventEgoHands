@@ -19,9 +19,6 @@ If you use our code or refer to this project, please cite it using
 }
 ```
 
-## Updates 
-* Training code for N-Caltech101 and DSEC-DET have been open sourced. To train your model jump to the [training section](#training)
-
 ## Installation
 First, download the github repository and its dependencies
 ```bash
@@ -33,14 +30,19 @@ DAGR_DIR=$WORK_DIR/dagr
 cd $DAGR_DIR 
 
 ```
-Then start by installing the main libraries. Make sure Anaconda (or better Mamba), PyTorch, and CUDA is installed. 
+Then start by installing the main libraries. Make sure Anaconda (or better Mamba), PyTorch, and CUDA is installed. If using a HPC cluster, the preferred option would be to use micromamba to resolve package conflicts. You first have to manually install micromamba and set the path in your bashrc file. (If any packages are not found, try the nvidia channel). Make sure that the pytorch is being installed with the right CUDA version as the cudatoolkit. When using the HPC cluster, CUDA_HOME won't be set because `cudatoolkit` comes with the barebones to run pytorch. These problems are fixed by installing `cudatoolkit-dev`. Your can load the cuda in your HPC by eg.,`module load cuda/11.6.2`. This does solve the issue of CUDA_HOME variable not being set but you will have to make sure all packages that need cuda use this version. Its better to install cudatoolkit into your environment instead of using the HPC CUDA. 
 ```bash
 cd $DAGR_DIR
-conda create -y -n dagr python=3.8 
-conda activate dagr
-conda install -y setuptools==69.5.1 mkl==2024.0 pytorch==1.11.0 torchvision==0.12.0 torchaudio==0.11.0 cudatoolkit=11.3 -c pytorch
+micromamba create -n dagr python=3.8 
+micromamba activate dagr
+micromamba install setuptools=69.5.1 mkl=2024.0 pytorch=1.11.0 torchvision=0.12.0 torchaudio=0.11.0 cudatoolkit=11.3 cudatoolkit-dev=11.3.1 -c pytorch -c conda-forge
 ```
-Then install the pytorch-geometric libraries. This may take a while.
+Then install the pytorch-geometric libraries:
+```bash
+micromamba install pyg -c pyg -c conda-forge
+micromamba install pytorch-spline-conv -c pyg
+pip install torch-geometric==2.5.3
+```
 ```bash
 bash install_env.sh
 ```
@@ -48,7 +50,7 @@ The above bash file will figure out the CUDA and Torch version, and install the 
 Then, download and install additional dependencies locally 
 ```bash
 bash download_and_install_dependencies.sh
-conda install -y h5py blosc-hdf5-plugin
+micromamba install h5py blosc-hdf5-plugin
 ```
 Finally, install the dagr package
 ```bash
@@ -64,7 +66,7 @@ This will download a checkpoint and data fragment of DSEC-Detection on which you
 Once downloaded, run the following command
 ```bash 
 LOG_DIR=/path/to/log
-DEVICE=1
+DEVICE=0
 CUDA_VISIBLE_DEVICES=$DEVICE python scripts/run_test_interframe.py --config config/dagr-s-dsec.yaml \
                                                                    --use_image \
                                                                    --img_net resnet50 \
@@ -170,16 +172,4 @@ python scripts/train_ncaltech101.py --config config/dagr-l-ncaltech.yaml \
                                     --dataset_directory $DAGR_DIR/data/ \
                                     --output_directory $DAGR_DIR/logs/
 ```
-To train on DSEC, make a symlink to the data directory via 
-```bash
-ln -s $DSEC_ROOT $DAGR_DIR/data/dsec 
-```
-Then run training with 
-```bash
 
-python scripts/train_dsec.py --config config/dagr-s-dsec.yaml \
-                             --exp_name dsec_s_50 \
-                             --dataset_directory $DAGR_DIR/data/ \
-                             --output_directory $DAGR_DIR/logs/ \
-                             --use_image --img_net resnet50 --batch_size 32
-```
