@@ -1,0 +1,8 @@
+*.so
+*.egg-info/
+*.pyc
+build/
+libs/
+.idea/
+logs/
+/logs_bharghav

@@ -1,0 +1,413 @@
+import numpy as np
+import torch
+import hdf5plugin
+import h5py
+import os
+from pathlib import Path
+from typing import Optional, Callable
+from torch.utils.data import Dataset
+from torch_geometric.data import Data
+from dagr.data.augment import init_transforms
+from dagr.data.utils import to_data
+import cv2
+import json
+from torch_geometric.data import DataLoader
+from torch_geometric.data import Data
+from torch_geometric.profile import get_data_size
+import sys
+import pybboxes as pbx
+
+torch.cuda.empty_cache()
+
+
+def tracks_to_array(tracks):
+    return np.stack([tracks['x'], tracks['y'], tracks['w'], tracks['h'], tracks['class_id']], axis=1)
+
+def tracks_list_to_dict(tracks):
+    ret_tracks = [{'x':tracks[0],'y':tracks[1],'w':tracks[2],'h':tracks[3],'class_id':1}]
+    return ret_tracks
+
+
+    
+class Egohands(Dataset):
+
+    #note that everything is zero based indexing - no exceptions
+
+    def __init__(self, root:Path, bbox_path:Path, num_events: int=50000,num_frames=2700):
+        super().__init__()
+        self.num_events = num_events
+        self.num_frames = num_frames
+        self.root = root
+        self.bbox_path = bbox_path
+        self.time_window = 1000000
+        self.classes = ("hand")
+        self.height = 180
+        self.width = 320
+        self.num_classes = 1
+        self.scale = 4
+        self.num_us = -1
+        #assert frames in dataset to ensure completeness
+        self.assert_frames()
+        
+
+        
+        with open(self.bbox_path, "r") as f:
+            self.tracks_data = json.load(f)
+
+ 
+    def set_num_us(self, num_us):
+        self.num_us = num_us
+
+
+    def __len__(self):
+        len = (self.num_frames-1)*(self.get_num_files(self.root,"events"))
+        return len
+
+
+    def __getitem__(self, idx):
+
+
+        
+        # Retrieve the frames, events, and tracks
+        image0, image1, vid_name_frames = self.get_frames(idx)
+
+        image0, image1, vid_name_frames = self.get_frames(idx)
+
+        
+
+        if image0 is None:
+            print("image0 is none here")
+            image0,image1,vid_name_frames = self.get_frames(12345)
+        
+        if image0 is None:
+            print("image1 is none here")
+            image0,image1,vid_name_frames = self.get_frames(12345)
+
+        
+
+
+
+        image0 = self.preprocess_frames(image0)
+        # image1 = self.preprocess_frames(image1)
+        image0 = image0.to(torch.uint8)
+        # image1 = image1.to(torch.uint8)
+        events, vid_name_events = self.get_events(idx)
+        tracks0, tracks1 = self.get_tracks_coco(idx, self.bbox_path, vid_name_frames,self.tracks_data)
+        # print("tracks0 is",tracks0)
+
+
+    
+     
+        tracks0 = tracks0.astype(np.float32)
+        tracks1 = tracks1.astype(np.float32)
+
+        
+        # Get timestamps
+        rel_idx = self.get_rel_idx(idx)
+        timestamps_rgb = [int(1e6 * ((1 / 30) * i)) for i in range(self.num_frames)]
+        image_ts_0, image_ts_1 = timestamps_rgb[rel_idx], timestamps_rgb[rel_idx + 1]
+        # print("bbox type", tracks0.dtype)
+        # Convert to torch geometric data
+
+
+        # print("the frame name is", vid_name_frames)
+        data = to_data(
+            **events,
+            bbox=tracks1,
+            bbox0=tracks0,
+            image=image0,
+            width=self.width,
+            height=self.height,
+            sequence=vid_name_frames,
+            time_window=self.time_window,
+            t0=image_ts_0,
+            t1=image_ts_1
+
+        )
+        # print("bbox type after data", data.bbox.dtype)
+        # print("the data is",data)
+        return data
+
+
+
+        
+    def assert_frames(self):
+        data_dir = self.root
+        root_dir = os.path.join(data_dir, "frames")
+
+        # Iterate through each video folder
+        for vid_folder in os.listdir(root_dir):
+            vid_path = os.path.join(root_dir, vid_folder)
+
+        # Ensure it's a directory
+            if os.path.isdir(vid_path):
+                # print(f"Checking {vid_folder}...")
+                num_images = len([f for f in os.listdir(vid_path) if os.path.isfile(os.path.join(vid_path, f))])
+
+            # Assert condition
+            assert num_images == 2700, f"Error: {vid_folder} has {num_images} images instead of 2700"
+
+        print("All video folders have exactly 2700 images.")
+
+    
+
+
+
+
+
+    def get_events(self, idx):
+        #returns a dictionary of events in that timeframe
+        vid_no = self.get_vid_no(idx)
+        events_root = os.path.join(self.root,"events")
+        rel_idx = self.get_rel_idx(idx)
+        file_paths1 = []
+        for file in os.listdir(events_root):  # Iterate over all items in the 'frames' folder
+            file_path = os.path.join(events_root, file)  # Get the full path of the item
+            file_paths1.append(file_path)
+
+
+        if rel_idx>2500:
+            return self.get_events(370)
+
+        
+        # print(file_paths1)
+        file_paths = sorted(file_paths1)
+        # print(file_paths)
+        file = file_paths[vid_no]
+        with h5py.File(str(file)) as fh:
+            events = fh["events"]
+            timeidx = fh["timeidx"]
+            x = events["x"]
+            y = events["y"]
+            t = events["t"]
+            p = events["p"]
+            # if(rel_idx==2693):
+            #     print(f"we're at the exception where the idx is {idx} and rel_idx is {rel_idx}")
+            timestamp1 = timeidx[rel_idx]
+            # timestamp2 = timeidx[rel_idx+1]
+            if ((rel_idx+2)<len(timeidx)):
+                timestamp2 = timeidx[rel_idx+1]
+            else:
+                
+                # events={
+                #     'p':np.array([0]),
+                #     't':np.array([0]),
+                #     'x':np.array([0]),
+                #     'y':np.array([0]),
+                # }
+                return self.get_events(370)
+                # vid_name = os.path.basename(file)
+                # return events, vid_name
+
+            
+
+            # x_new = x[50:200]
+            # p_new = p[50:200]
+            # t_new = t[50:200]
+            # y_new = y[50:200]
+            x_new = x[timestamp1:(timestamp2-1)].astype(np.uint16)
+            p_new = p[timestamp1:(timestamp2-1)]
+            p_new = p_new.astype(np.int8)
+
+            # print("pnew before",p_new)
+            # p_new[p_new == 0] = -1 
+            # print("pnew after",p_new)
+            p_new = 2 * p_new.reshape((-1,1)) - 1
+            # print("p_new after weird reshape",p_new)
+            t_new = t[timestamp1:(timestamp2-1)].astype(np.int64)
+            y_new = y[timestamp1:(timestamp2-1)].astype(np.uint16)
+
+
+
+
+            #outlier handling case
+            if(len(x_new)<300):
+                # x_new = np.random.rand(20000).astype(np.uint16)
+                # y_new = np.random.rand(20000).astype(np.uint16)
+                # p_new = np.random.rand(20000).astype(np.int8)
+                # t_new = np.random.rand(20000).astype(np.int64)
+                print("the index where this shit is happening",idx)
+                print("the relative index of this shit",rel_idx)
+                return self.get_events(370)
+            
+            
+            
+
+
+
+            
+            events = {
+                'p': p_new,
+                't': t_new,
+                'x': x_new,
+                'y': y_new,
+            }
+
+        vid_name = os.path.basename(file)
+        return events,vid_name
+        
+
+        
+
+
+    def get_rel_idx(self, idx):
+        vid_no = self.get_vid_no(idx)
+        assert idx>=0, "invalid index"
+        assert vid_no<self.get_num_files(self.root,"events"), "no video exists at that index"
+        start_idx = (vid_no)*(self.num_frames-1)
+        end_idx = start_idx + (self.num_frames-2)
+        rel_idx = idx-start_idx
+        return rel_idx
+
+    def get_num_files(self, root, mode:str):
+        path = os.path.join(root,mode)
+        file_count = len([file for file in os.listdir(path) if os.path.isfile(os.path.join(path, file))])
+        return file_count
+
+
+    def get_vid_no(self,idx): #the video numbers are also zero indexing
+        return (idx//(self.num_frames-1))
+
+    def rescale_tracks(self,tracks):
+        
+        rescaled_tracks=[]
+        for track in tracks:
+            # print("the track is",track)
+            rescaled_track = []
+            for i in track:
+                i = i/self.scale
+                rescaled_track.append(i)
+                # print("the rescaled track is",rescaled_track)
+            rescaled_tracks.append(rescaled_track)
+        # print("the rescaled tracks are",rescaled_tracks)
+        
+
+        return rescaled_tracks
+
+
+
+
+    def get_tracks_coco(self, idx, bbox_path, vid_name: str,bbox_data):
+        frame_idx = self.get_rel_idx(idx)
+        print("the index is",idx)
+        print("the relative index is", frame_idx)
+        frame_key0 = f"{vid_name}_frame_{frame_idx}"
+        frame_key1 = f"{vid_name}_frame_{frame_idx+1}"
+
+        print("the frame key0 is", frame_key0)
+
+        # with open(bbox_path) as f:
+        #     bbox_data = json.load(f)
+
+        # Initialize empty lists to hold the bounding boxes
+        bboxes0 = []
+        bboxes1 = []
+
+        # Check if frame_key0 exists in the bounding box data
+        if frame_key0 in bbox_data:
+            bboxes0 = bbox_data[frame_key0]
+
+        # Check if frame_key1 exists in the bounding box data
+        if frame_key1 in bbox_data:
+            bboxes1 = bbox_data[frame_key1]
+
+        # If no bounding boxes are found, return an empty array with shape (1, 5)
+        if not bboxes0 or not bboxes1:
+            print("a bounding box was  not found")
+            array = np.ones((1, 4))
+            array = np.insert(array, 4, 0, axis=1)
+            return array, array
+        
+
+        bbox0_new = np.array(bboxes0,dtype=np.float32)
+        bbox1_new = np.array(bboxes1,dtype=np.float32)
+ 
+
+        bbox0_new = np.hstack([bbox0_new, np.zeros((bbox0_new.shape[0], 1),dtype=np.float32)])
+        bbox1_new = np.hstack([bbox1_new, np.zeros((bbox1_new.shape[0], 1),dtype=np.float32)])
+
+        print("the bbox0_new is",bbox0_new)
+        print("the bbox1_new is",bbox1_new)
+        return bbox0_new, bbox1_new
+     
+
+    
+
+
+    def get_frames(self,idx): #frames/image
+        vid_no = self.get_vid_no(idx)
+        # path1 = os.path.join(root,"events")
+        frames_root = os.path.join(self.root,"frames")
+        folder_paths1 = []  # Initialize an empty list to store folder paths
+        for folder in os.listdir(frames_root):  # Iterate over all items in the 'frames' folder
+            folder_path = os.path.join(frames_root, folder)  # Get the full path of the item
+            folder_paths1.append(folder_path)
+        # print(folder_paths1)
+        folder_paths=sorted(folder_paths1)
+        # print(folder_paths)
+        frames_path = folder_paths[vid_no]
+        rel_idx = self.get_rel_idx(idx)
+        frame_path1 = os.path.join(frames_path,f"frame_{rel_idx}.jpg")
+        frame_path2 = os.path.join(frames_path,f"frame_{rel_idx+1}.jpg")
+        vid_name = os.path.basename(frames_path)
+        frame1 = cv2.imread(frame_path1)
+        frame2 = cv2.imread(frame_path2)
+
+
+
+        return frame1,frame2, vid_name
+    
+    def preprocess_frames(self,image):
+
+        image = torch.from_numpy(image).permute(2, 0, 1)
+        image = image.unsqueeze(0)
+    
+        return image
+
+
+
+# events = get_events_in_time_window("/cfs/earth/scratch/kotabha1/v2e/cards_courtyard_B_T_split.h5")
+# print(events) 
+
+#calls and tests
+# path = "/cfs/earth/scratch/kotabha1/egohands/test/events/chess_livingroom_S_B.h5"
+root = "/cfs/earth/scratch/kotabha1/egohands_v2_backup/train"
+bbox_path = "/cfs/earth/scratch/kotabha1/egohands_v2_backup/bounding_boxes.json"
+root_test = "/cfs/earth/scratch/kotabha1/egohands_v2_backup/test"
+root_train = "/cfs/earth/scratch/kotabha1/egohands_v2_backup/train"
+
+train_dataset = Egohands(root_train, bbox_path)
+obj = Egohands(root,bbox_path)
+# train_loader = DataLoader(obj, follow_batch=['bbox', 'bbox0'], batch_size=2, shuffle=False, num_workers=1, drop_last=True)
+# batches = next(iter(train_loader))
+# samples = batch.to_data_list()
+
+# for batch in batches:
+#     print(batch)
+# print(type(train_loader))
+
+
+# # print(obj[44798]) #this is a empty bbox index and taken as a demo for exception handling
+# # print(obj[44798].bbox)
+
+
+
+
+#checking the size of the data fragment
+###############################################################################
+# print(obj[12345])
+print(obj[419])
+
+# print(type(obj[12345]))
+# print(f"the size of the obtained data fragment is {get_data_size(obj[12345])} bytes")
+
+# print(f"python's obj size checker {sys.getsizeof(obj[44780])}")
+###############################################################################
+
+
+
+
+
+
+
+
